@@ -1,0 +1,166 @@
+﻿========================================================================
+ Better HK · 移速 3 倍   技术说明与验证清单（v1.6.0，作者：小禾苗）
+========================================================================
+
+一、为什么是程序集补丁，而不是 Mods 文件夹里的 DLL
+------------------------------------------------------------------------
+Hollow Knight 的标准 mod 依赖「Modding API / Lumafly」等加载器：加载器
+本身就是给 Assembly-CSharp.dll 打补丁、注入 ModHooks，再由它把 Mods\ 下的
+DLL 加载进游戏。目标版本 1.5.12620 使用 Unity 6000.0.61f1，目前没有与之
+适配的加载器；本机游戏目录也没有任何加载器痕迹（ModHooks / BepInEx /
+Harmony / Mods 文件夹全部为 0 命中）。因此做成标准 mod 在本版本上根本
+不会被加载。本补丁直接完成那一步最小注入，不引入任何框架。
+
+二、改了什么
+------------------------------------------------------------------------
+反汇编 HeroController.Move(float) 可见 5 个速度分支，各自执行
+    rb2d.velocity = new Vector2(move_direction * <速度字段>, rb2d.velocity.y)
+
+对应的 IL（7 字节，每个模式在整个程序集中唯一命中一次）：
+    ldarg.0              02            压入 this
+    ldfld <字段 token>   7B + 4 字节   弹出 this，压入速度值（净栈 0）
+    mul                  5A            弹出 2 个值，压入乘积
+
+补丁把 4 个「常规地面/空中」分支等长替换为：
+    nop                  00            不压栈
+    ldc.r4 <3 倍原值>    22 + 4 字节   压入 float32 常量
+    mul                  5A            不变
+
+  字段                    原值  ->  新值    文件偏移    match             -> replace
+  WALK_SPEED               6.0 ->  18.0    0x234CB    027B7F0400045A    -> 0022000090415A
+  RUN_SPEED_CH_COMBO      11.5 ->  34.5    0x2354C    027B7E0400045A    -> 002200000A425A
+  RUN_SPEED_CH            10.0 ->  30.0    0x2358F    027B7D0400045A    -> 00220000F0415A
+  RUN_SPEED                8.3 ->  24.9    0x235B8    027B7C0400045A    -> 00223333C7415A
+
+  UNDERWATER_SPEED 分支（027B800400045A）保持原样 —— 水下不属于地面/空中。
+
+栈平衡（关键）：
+  原版   ldarg.0(+1) → ldfld(净 0) → mul(-1)
+  补丁版 nop(0)      → ldc.r4(+1) → mul(-1)
+替换区间结束后栈深度完全一致，整个方法体指令数（106）、方法体长度、
+跳转目标、元数据、异常表都不变。
+
+v1.0.0 的故障（已修复，勿重犯）：只把 ldfld 换成 ldc.r4、留下 ldarg.0，
+会在 mul 前多出一个 this 对象引用，Mono 每帧抛
+    InvalidProgramException: Invalid IL code in HeroController:Move
+人物完全无法左右移动。v1.1.0 把前面的 ldarg.0 一并换成 nop。
+
+三、为什么不直接把速度字段改成 3 倍
+------------------------------------------------------------------------
+RUN_SPEED 同时被 DoWallJump() 和 LeaveScene() 读取。改字段默认值会连带
+破坏蹬墙跳与离场逻辑。因此只在 Move() 内替换读取指令，字段本身保持原值。
+冲刺（DASH_SPEED 等）、跳跃（JUMP_SPEED / WJ_KICKOFF_SPEED 等）、
+Rigidbody2D / Collider2D / Animator / PlayerData 相关代码完全不动。
+
+四、完整性 / 安全性设计
+------------------------------------------------------------------------
+* 规格锁定原版与补丁版 SHA-256、文件大小、4 个字段 token 与偏移。
+* 应用前：4 个 7 字节模式必须在全文件各唯一命中；偏移固定或相对间距
+  与规格一致；水下分支不变式成立；文件大小一致。
+* 应用后：仅 24 个字节变化；用「把 4 个区间反向恢复后整体哈希 == 改动前
+  哈希」证明其余字节零改动；临时文件预校验 + 原地 r+b 覆盖 + 回读校验。
+* 原地覆盖而非删除重建：部分 Windows 环境替换 Assembly-CSharp.dll 会
+  返回 WinError 5（被后台进程/安全软件持有句柄）。
+* 原版 DLL 自动备份到 backups\；restore 优先用备份，无备份时反向替换。
+* 幂等：重复安装会跳过；未知哈希直接拒绝，不猜测、不盲写。
+* 不修改游戏目录下的任何其它文件，临时文件自动清理。
+
+  原版 SHA-256  : e9048ef6a633970f735e01ec166d3959f610eaea7a88d827d48d67b1e5fb87bd
+  补丁 SHA-256  : fee143fe3ccd6d59595443b3f4d69a5f4937d94ba9120b9d1b66b5c8b204faba
+  文件大小      : 3652608 字节（补丁前后一致）
+  改动字节      : 24
+
+五、验证清单
+------------------------------------------------------------------------
+【3 倍移速确实生效】
+  1. Verify.bat 输出「结论: PASS」，差异 24 字节、越界 0。
+  2. 反汇编 Move() 仍是 106 条指令，4 处 ldc.r4 为 18 / 34.5 / 30 / 24.9。
+  3. 平地按住方向键固定时长，位移约为原版 3 倍（velocity.x ≈ 24.9）。
+  4. 跳起后空中水平速度同为 3 倍。
+  5. 装备疾跑护符约 30，护符组合约 34.5，慢走区约 18。
+  6. 水下仍为 6.0 档（未纳入补丁范围）。
+
+【其它行为保持正常】
+  7. 冲刺距离 / 冷却 / 暗影冲刺 / 超级冲刺与原版一致。
+  8. 跳跃高度、二段跳、蹬墙跳水平初速未异常（重点：RUN_SPEED 字段未被改动）。
+  9. 进出场景、长椅存档、PlayerData 无异常。
+ 10. 平台 / 尖刺 / 墙壁碰撞行为一致（3 倍速下薄墙可能高速穿透，属引擎现象）。
+ 11. 待机 / 跑步 / 空中 / 受击动画与击退、无敌帧一致。
+ 12. Player.log 中本次启动没有 InvalidProgramException / Invalid IL code。
+ 13. 与备份逐字节比较：只有 24 字节差异，越界 0。
+
+六、版本变化怎么办
+------------------------------------------------------------------------
+Steam 更新或换版本后 DLL 哈希会变，安装器会拒绝执行。此时需要重新反汇编
+HeroController.Move() 定位这 4 个分支，生成新的 patch_spec.json 后再分发；
+切勿在未知版本上强制安装。
+
+七、BenchWarp（长椅互相传送）实现说明
+------------------------------------------------------------------------
+【为什么它必须是一个 DLL，而不是字节补丁】
+移速改动只是「把已有的乘法换成常量」，属于等长替换；而长椅互传要新增
+「列表 + 选择 + 跳转」逻辑，字节补丁做不到。本机也没有任何 mod 加载器
+（Assembly-CSharp.dll 中 ModHooks / HollowKnight.Modding / BepInEx / Harmony
+命中数均为 0，游戏目录无 Mods、doorstop_config.ini、winhttp.dll）。
+游戏自带的 CheatManager（含场景传送 GUI）在正式版被裁空：
+  get_IsCheatsEnabled = ldc.i4.0; ret（恒 false）
+  DrawGUI / CreateSubMenus = ret
+所以「打开内置传送菜单」这条路不存在。
+
+【挂载方式：不装加载器，用 Unity 自己的装配清单】
+Unity 6 玩家端在 hollow_knight_Data 下有两份清单：
+  ScriptingAssemblies.json      {"names":[..],"types":[..]}  启动时加载的程序集
+  RuntimeInitializeOnLoads.json {"root":[{assemblyName,nameSpace,className,
+                                 methodName,loadTypes,isUnityClass}]}
+把 BenchWarp.dll 放进 Managed\，在 names 追加 "BenchWarp.dll"（types 同步追加
+一项以保持长度一致），再在 root 追加一条指向 BenchWarpMod.Bootstrap.Init 的
+记录，Unity 就会在启动时加载该程序集并反射调用 Init()。
+Init() 里 new GameObject + DontDestroyOnLoad + AddComponent，得到一个常驻
+MonoBehaviour，从此刻起每帧 Update / OnGUI 可控。
+
+【传送逻辑：完全复用游戏自带的复活流程（不新增任何游戏侧代码）】
+  1. PlayerData.SetBenchRespawn(marker, scene, 1, true)   // respawnType=1 表示 Bench
+  2. 目标场景 != 当前场景：
+       GameManager.ReadyForRespawn(false)
+       → 内部 BeginSceneTransition(new SceneLoadInfo{ PreventCameraFadeOut=true,
+         EntryGateName="", SceneName=playerData.respawnScene,
+         Visualization=(isFirst?0:4), AlwaysUnloadUnusedAssets=true })
+       → 场景加载完成进入 GameManager.EnterHero：
+           if (RespawningHero) StartCoroutine(hero_ctrl.Respawn()); RespawningHero=false;
+       → HeroController.Respawn() 协程：
+           LocateSpawnPoint()  按 respawnMarkerName 找 tag=RespawnPoint 的物体
+           把角色放到该点（含 Bench Control FSM 的 "Adjust Vector" 偏移）
+           respawnType == 1 → 找该物体上的 "Bench Control" FSM，
+           置 FsmBool "RespawnResting" = true → 角色直接坐在长椅上
+           发送 "HeroCtrl-Respawned"、FinishedEnteringScene，播 "Wake Up Ground"
+     目标场景 == 当前场景：直接 GameManager.StartCoroutine(hero_ctrl.Respawn())
+  3. 结果：与「在这里坐过长椅」完全等价，存档点自然更新为目标长椅。
+
+【长椅数据从哪来】
+  · 场景清单：PlayerData.scenesEncounteredBench（游戏自己维护的已遇见长椅，
+    用反射按 IEnumerable 读取，避免依赖其具体集合类型）
+  · 复活点名字：只有真正坐过某张长椅，PlayerData 才会写入 respawnMarkerName，
+    因此 mod 在 PlayerData.atBench 为 true 时记录 scene -> marker 映射，
+    存到存档目录 BenchWarp_benches.txt（跨存档累积，可删除重建）
+
+【按键】
+旧版 Input 与新版 InputSystem 都尝试：先探测 UnityEngine.Input 是否可用
+（被禁用会抛异常），失败则改用 InputSystem 的 Keyboard.current[Key]。避免
+游戏使用 New Input System 时按键完全无响应。
+
+【改动范围与还原】
+  · 新增 1 个文件：Managed\BenchWarp.dll
+  · 两份 JSON 各追加 1 条记录（首次安装备份为 backups\*.orig）
+  · 卸载：删除 DLL，按条目从两份 JSON 中精确移除，重新校验 names/types 长度一致
+  · 不触碰 Assembly-CSharp.dll、存档、配置
+
+【验证清单】
+  1. Status.bat 显示 DLL 已安装、清单已登记、启动入口已登记。
+  2. 启动游戏后 BenchWarp.log 出现 "BenchWarp v1.0.0 loaded"。
+  3. 游戏内 F1 弹出列表，条目数与已遇见长椅数量相符。
+  4. 选一张 [not recorded] 之外的长椅传送：过场加载后角色坐在目标长椅上。
+  5. 传送后按 Esc 站起、左右走动正常；再坐一次该长椅仍能存档。
+  6. 传送后死亡，复活点应为刚传送到的长椅。
+  7. 与 3 倍移速补丁同时安装时：移动速度仍为 3 倍，两者互不影响。
+  8. 卸载后重启游戏：F1 无反应，Player.log 无与 BenchWarp 相关的报错。
+========================================================================

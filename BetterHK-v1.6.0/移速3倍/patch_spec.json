@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "mod_name": "TripleWalkSpeed",
+  "mod_version": "1.1.0",
+  "description": "Hollow Knight 1.5.12620: 常规地面/空中水平移动速度 x3。把 Move() 中 4 处 [ldarg.0; ldfld <速度字段>; mul] (7 字节) 等长替换为 [nop; ldc.r4 <3 倍值>; mul] (7 字节)，消除 ldfld 所需的 this，保持栈平衡。",
+  "target_game_version": "1.5.12620",
+  "target_unity_version": "6000.0.61f1",
+  "target_relative_path": "hollow_knight_Data/Managed/Assembly-CSharp.dll",
+  "reference_game_dirs": [
+    "I:/SteamLibrary/steamapps/common/Hollow Knight",
+    "C:/Program Files (x86)/Steam/steamapps/common/Hollow Knight"
+  ],
+  "original_sha256": "e9048ef6a633970f735e01ec166d3959f610eaea7a88d827d48d67b1e5fb87bd",
+  "patched_sha256": "fee143fe3ccd6d59595443b3f4d69a5f4937d94ba9120b9d1b66b5c8b204faba",
+  "original_size": 3652608,
+  "multiplier": 3.0,
+  "opcodes": {
+    "ldarg.0": "0x02",
+    "nop": "0x00",
+    "ldfld": "0x7B",
+    "ldc.r4": "0x22",
+    "mul": "0x5A"
+  },
+  "instruction_length_bytes": 7,
+  "changed_bytes_total": 24,
+  "stack_balance": {
+    "original": "ldarg.0 (+1) -> ldfld (弹 this 压 value, 净 0) -> mul (弹 2 压 1, 净 -1)",
+    "patched": "nop (净 0) -> ldc.r4 (+1) -> mul (弹 2 压 1, 净 -1)",
+    "note": "v1.0.0 只把 ldfld 换成 ldc.r4，栈上多出一个 this 引用，导致 InvalidProgramException: Invalid IL code in HeroController:Move，人物无法左右移动。v1.1.0 连同前面的 ldarg.0 一并替换为 nop，栈深度序列与原版完全一致。"
+  },
+  "assets_reference": {
+    "file": "hollow_knight_Data/resources.assets",
+    "float_sequence_offset": "0x13AA664",
+    "float_sequence": [8.3, 10.0, 11.5, 6.0, 6.0, 16.65, 14.0, 3.0],
+    "note": "HeroController 序列化常量串，按字段声明顺序: RUN_SPEED, RUN_SPEED_CH, RUN_SPEED_CH_COMBO, WALK_SPEED, UNDERWATER_SPEED, JUMP_SPEED, JUMP_SPEED_UNDERWATER, MIN_JUMP_SPEED。只读参考，补丁不修改该文件。"
+  },
+  "additional_invariants": [
+    {
+      "label": "UNDERWATER_SPEED 分支",
+      "hex": "027B800400045A",
+      "expected_count": 1,
+      "note": "水下分支保持 ldarg.0; ldfld UNDERWATER_SPEED; mul 原样"
+    }
+  ],
+  "patches": [
+    {
+      "field": "WALK_SPEED",
+      "token": "0x0400047F",
+      "original": 6.0,
+      "tripled": 18.0,
+      "file_offset": "0x234CB",
+      "branch": "地面慢走区 (inWalkZone) 水平速度",
+      "match_hex": "027B7F0400045A",
+      "replace_hex": "0022000090415A"
+    },
+    {
+      "field": "RUN_SPEED_CH_COMBO",
+      "token": "0x0400047E",
+      "original": 11.5,
+      "tripled": 34.5,
+      "file_offset": "0x2354C",
+      "branch": "装备疾跑护符组合时的地面/空中水平速度",
+      "match_hex": "027B7E0400045A",
+      "replace_hex": "002200000A425A"
+    },
+    {
+      "field": "RUN_SPEED_CH",
+      "token": "0x0400047D",
+      "original": 10.0,
+      "tripled": 30.0,
+      "file_offset": "0x2358F",
+      "branch": "装备疾跑护符时的地面/空中水平速度",
+      "match_hex": "027B7D0400045A",
+      "replace_hex": "00220000F0415A"
+    },
+    {
+      "field": "RUN_SPEED",
+      "token": "0x0400047C",
+      "original": 8.3,
+      "tripled": 24.9,
+      "file_offset": "0x235B8",
+      "branch": "常规地面/空中水平速度 (默认分支)",
+      "match_hex": "027B7C0400045A",
+      "replace_hex": "00223333C7415A"
+    }
+  ],
+  "explicitly_unchanged": {
+    "UNDERWATER_SPEED": "水下移动不属于地面/空中，保留 ldarg.0; ldfld 0x04000480; mul",
+    "DASH_SPEED / DASH_SPEED_SHARP / SHADOW_DASH_SPEED / SUPER_DASH_SPEED / BACK_DASH_SPEED": "冲刺速度，独立字段独立分支",
+    "JUMP_SPEED / JUMP_SPEED_UNDERWATER / MIN_JUMP_SPEED / WJ_KICKOFF_SPEED": "跳跃与墙跳，独立字段",
+    "LeaveScene / DoWallJump": "RUN_SPEED 字段被这两个方法复用，因此不改字段值，只改 Move() 内的读取指令",
+    "Rigidbody2D / Collider2D / Animator / PlayerData": "碰撞、动画、受击、存档相关代码完全不动"
+  }
+}
